@@ -2055,7 +2055,8 @@ bool Sema::CheckAttrNoArgs(const ParsedAttr &Attrs) {
 bool Sema::CheckAttrTarget(const ParsedAttr &AL) {
   // Check whether the attribute is valid on the current target.
   if (!AL.existsInTarget(Context.getTargetInfo())) {
-    Diag(AL.getLoc(), diag::warn_unknown_attribute_ignored) << AL;
+    Diag(AL.getLoc(), diag::warn_unknown_attribute_ignored)
+        << AL << AL.getRange();
     AL.setInvalid();
     return true;
   }
@@ -6790,16 +6791,14 @@ DLLExportAttr *Sema::mergeDLLExportAttr(Decl *D,
 
 static void handleDLLAttr(Sema &S, Decl *D, const ParsedAttr &A) {
   if (isa<ClassTemplatePartialSpecializationDecl>(D) &&
-      (S.Context.getTargetInfo().getCXXABI().isMicrosoft() ||
-       S.Context.getTargetInfo().getTriple().isWindowsItaniumEnvironment())) {
+      (S.Context.getTargetInfo().shouldDLLImportComdatSymbols())) {
     S.Diag(A.getRange().getBegin(), diag::warn_attribute_ignored) << A;
     return;
   }
 
   if (const auto *FD = dyn_cast<FunctionDecl>(D)) {
     if (FD->isInlined() && A.getKind() == ParsedAttr::AT_DLLImport &&
-        !(S.Context.getTargetInfo().getCXXABI().isMicrosoft() ||
-          S.Context.getTargetInfo().getTriple().isWindowsItaniumEnvironment())) {
+        !(S.Context.getTargetInfo().shouldDLLImportComdatSymbols())) {
       // MinGW doesn't allow dllimport on inline functions.
       S.Diag(A.getRange().getBegin(), diag::warn_attribute_ignored_on_inline)
           << A;
@@ -6808,8 +6807,7 @@ static void handleDLLAttr(Sema &S, Decl *D, const ParsedAttr &A) {
   }
 
   if (const auto *MD = dyn_cast<CXXMethodDecl>(D)) {
-    if ((S.Context.getTargetInfo().getCXXABI().isMicrosoft() ||
-         S.Context.getTargetInfo().getTriple().isWindowsItaniumEnvironment()) &&
+    if ((S.Context.getTargetInfo().shouldDLLImportComdatSymbols()) &&
         MD->getParent()->isLambda()) {
       S.Diag(A.getRange().getBegin(), diag::err_attribute_dll_lambda) << A;
       return;
@@ -7362,7 +7360,7 @@ static void ProcessDeclAttribute(Sema &S, Scope *scope, Decl *D,
            AL.isDeclspecAttribute()
                ? (unsigned)diag::warn_unhandled_ms_attribute_ignored
                : (unsigned)diag::warn_unknown_attribute_ignored)
-        << AL;
+        << AL << AL.getRange();
     return;
   }
 
@@ -7486,19 +7484,12 @@ static void ProcessDeclAttribute(Sema &S, Scope *scope, Decl *D,
     handlePassObjectSizeAttr(S, D, AL);
     break;
   case ParsedAttr::AT_Constructor:
-    if (S.Context.getTargetInfo().getTriple().isOSAIX())
-      llvm::report_fatal_error(
-          "'constructor' attribute is not yet supported on AIX");
-    else
       handleConstructorAttr(S, D, AL);
     break;
   case ParsedAttr::AT_Deprecated:
     handleDeprecatedAttr(S, D, AL);
     break;
   case ParsedAttr::AT_Destructor:
-    if (S.Context.getTargetInfo().getTriple().isOSAIX())
-      llvm::report_fatal_error("'destructor' attribute is not yet supported on AIX");
-    else
       handleDestructorAttr(S, D, AL);
     break;
   case ParsedAttr::AT_EnableIf:
@@ -8175,8 +8166,8 @@ NamedDecl * Sema::DeclClonePragmaWeak(NamedDecl *ND, IdentifierInfo *II,
     NewFD = FunctionDecl::Create(
         FD->getASTContext(), FD->getDeclContext(), Loc, Loc,
         DeclarationName(II), FD->getType(), FD->getTypeSourceInfo(), SC_None,
-        false /*isInlineSpecified*/, FD->hasPrototype(), CSK_unspecified,
-        FD->getTrailingRequiresClause());
+        false /*isInlineSpecified*/, FD->hasPrototype(),
+        ConstexprSpecKind::Unspecified, FD->getTrailingRequiresClause());
     NewD = NewFD;
 
     if (FD->getQualifier())

@@ -313,14 +313,6 @@ protected:
   uint64_t getSectionOffset(DataRefImpl Sec) const override;
   StringRef getRelocationTypeName(uint32_t Type) const;
 
-  /// Get the relocation section that contains \a Rel.
-  const Elf_Shdr *getRelSection(DataRefImpl Rel) const {
-    auto RelSecOrErr = EF.getSection(Rel.d.a);
-    if (!RelSecOrErr)
-      report_fatal_error(errorToErrorCode(RelSecOrErr.takeError()).message());
-    return *RelSecOrErr;
-  }
-
   DataRefImpl toDRI(const Elf_Shdr *SymTable, unsigned SymbolNum) const {
     DataRefImpl DRI;
     if (!SymTable) {
@@ -419,6 +411,14 @@ public:
     return *Ret;
   }
 
+  /// Get the relocation section that contains \a Rel.
+  const Elf_Shdr *getRelSection(DataRefImpl Rel) const {
+    auto RelSecOrErr = EF.getSection(Rel.d.a);
+    if (!RelSecOrErr)
+      report_fatal_error(errorToErrorCode(RelSecOrErr.takeError()).message());
+    return *RelSecOrErr;
+  }
+
   const Elf_Shdr *getSection(DataRefImpl Sec) const {
     return reinterpret_cast<const Elf_Shdr *>(Sec.p);
   }
@@ -441,7 +441,7 @@ public:
 
   unsigned getPlatformFlags() const override { return EF.getHeader().e_flags; }
 
-  const ELFFile<ELFT> *getELFFile() const { return &EF; }
+  const ELFFile<ELFT> &getELFFile() const { return EF; }
 
   bool isDyldType() const { return isDyldELFObject; }
   static bool classof(const Binary *v) {

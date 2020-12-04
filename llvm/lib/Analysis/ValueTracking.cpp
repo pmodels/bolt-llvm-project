@@ -527,6 +527,7 @@ bool llvm::isAssumeLikeIntrinsic(const Instruction *I) {
       // FIXME: This list is repeated from NoTTI::getIntrinsicCost.
       case Intrinsic::assume:
       case Intrinsic::sideeffect:
+      case Intrinsic::pseudoprobe:
       case Intrinsic::dbg_declare:
       case Intrinsic::dbg_value:
       case Intrinsic::dbg_label:
@@ -992,9 +993,16 @@ static void computeKnownBitsFromShiftOperator(
   computeKnownBits(I->getOperand(0), DemandedElts, Known2, Depth + 1, Q);
   computeKnownBits(I->getOperand(1), DemandedElts, Known, Depth + 1, Q);
 
-  if (Known.isConstant()) {
-    unsigned ShiftAmt = Known.getConstant().getLimitedValue(BitWidth - 1);
-    Known = KF(Known2, KnownBits::makeConstant(APInt(32, ShiftAmt)));
+  // Note: We cannot use Known.Zero.getLimitedValue() here, because if
+  // BitWidth > 64 and any upper bits are known, we'll end up returning the
+  // limit value (which implies all bits are known).
+  uint64_t ShiftAmtKZ = Known.Zero.zextOrTrunc(64).getZExtValue();
+  uint64_t ShiftAmtKO = Known.One.zextOrTrunc(64).getZExtValue();
+  bool ShiftAmtIsConstant = Known.isConstant();
+  bool MaxShiftAmtIsOutOfRange = Known.getMaxValue().uge(BitWidth);
+
+  if (ShiftAmtIsConstant) {
+    Known = KF(Known2, Known);
 
     // If the known bits conflict, this must be an overflowing left shift, so
     // the shift result is poison. We can return anything we want. Choose 0 for
@@ -1009,16 +1017,10 @@ static void computeKnownBitsFromShiftOperator(
   // LHS, the value could be poison, but bail out because the check below is
   // expensive.
   // TODO: Should we just carry on?
-  if (Known.getMaxValue().uge(BitWidth)) {
+  if (MaxShiftAmtIsOutOfRange) {
     Known.resetAll();
     return;
   }
-
-  // Note: We cannot use Known.Zero.getLimitedValue() here, because if
-  // BitWidth > 64 and any upper bits are known, we'll end up returning the
-  // limit value (which implies all bits are known).
-  uint64_t ShiftAmtKZ = Known.Zero.zextOrTrunc(64).getZExtValue();
-  uint64_t ShiftAmtKO = Known.One.zextOrTrunc(64).getZExtValue();
 
   // It would be more-clearly correct to use the two temporaries for this
   // calculation. Reusing the APInts here to prevent unnecessary allocations.
@@ -1290,9 +1292,6 @@ static void computeKnownBitsFromOperator(const Operator *I,
     APInt AccConstIndices(BitWidth, 0, /*IsSigned*/ true);
 
     gep_type_iterator GTI = gep_type_begin(I);
-    // If the inbounds keyword is not present, the offsets are added to the
-    // base address with silently-wrapping two’s complement arithmetic.
-    bool IsInBounds = cast<GEPOperator>(I)->isInBounds();
     for (unsigned i = 1, e = I->getNumOperands(); i != e; ++i, ++GTI) {
       // TrailZ can only become smaller, short-circuit if we hit zero.
       if (Known.isUnknown())
@@ -1357,17 +1356,17 @@ static void computeKnownBitsFromOperator(const Operator *I,
       // to the width of the pointer.
       IndexBits = IndexBits.sextOrTrunc(BitWidth);
 
+      // Note that inbounds does *not* guarantee nsw for the addition, as only
+      // the offset is signed, while the base address is unsigned.
       Known = KnownBits::computeForAddSub(
-          /*Add=*/true,
-          /*NSW=*/IsInBounds, Known, IndexBits);
+          /*Add=*/true, /*NSW=*/false, Known, IndexBits);
     }
     if (!Known.isUnknown() && !AccConstIndices.isNullValue()) {
       KnownBits Index(BitWidth);
       Index.Zero = ~AccConstIndices;
       Index.One = AccConstIndices;
       Known = KnownBits::computeForAddSub(
-          /*Add=*/true,
-          /*NSW=*/IsInBounds, Known, Index);
+          /*Add=*/true, /*NSW=*/false, Known, Index);
     }
     break;
   }
@@ -1515,28 +1514,12 @@ static void computeKnownBitsFromOperator(const Operator *I,
     if (const IntrinsicInst *II = dyn_cast<IntrinsicInst>(I)) {
       switch (II->getIntrinsicID()) {
       default: break;
-      case Intrinsic::abs:
+      case Intrinsic::abs: {
         computeKnownBits(I->getOperand(0), Known2, Depth + 1, Q);
-
-        // If the source's MSB is zero then we know the rest of the bits.
-        if (Known2.isNonNegative()) {
-          Known.Zero |= Known2.Zero;
-          Known.One |= Known2.One;
-          break;
-        }
-
-        // Absolute value preserves trailing zero count.
-        Known.Zero.setLowBits(Known2.Zero.countTrailingOnes());
-
-        // If this call is undefined for INT_MIN, the result is positive. We
-        // also know it can't be INT_MIN if there is a set bit that isn't the
-        // sign bit.
-        Known2.One.clearSignBit();
-        if (match(II->getArgOperand(1), m_One()) || Known2.One.getBoolValue())
-          Known.Zero.setSignBit();
-        // FIXME: Handle known negative input?
-        // FIXME: Calculate the negated Known bits and combine them?
+        bool IntMinIsPoison = match(II->getArgOperand(1), m_One());
+        Known = Known2.abs(IntMinIsPoison);
         break;
+      }
       case Intrinsic::bitreverse:
         computeKnownBits(I->getOperand(0), DemandedElts, Known2, Depth + 1, Q);
         Known.Zero |= Known2.Zero.reverseBits();
@@ -2917,8 +2900,7 @@ static unsigned ComputeNumSignBitsImpl(const Value *V,
       // fall-back.
       if (Tmp == 1)
         break;
-      assert(Tmp <= Ty->getScalarSizeInBits() &&
-             "Failed to determine minimum sign bits");
+      assert(Tmp <= TyBits && "Failed to determine minimum sign bits");
       return Tmp;
     }
     case Instruction::Call: {
@@ -3627,12 +3609,13 @@ Value *llvm::isBytewiseValue(Value *V, const DataLayout &DL) {
 
   if (auto *CE = dyn_cast<ConstantExpr>(C)) {
     if (CE->getOpcode() == Instruction::IntToPtr) {
-      auto PS = DL.getPointerSizeInBits(
-          cast<PointerType>(CE->getType())->getAddressSpace());
-      return isBytewiseValue(
-          ConstantExpr::getIntegerCast(CE->getOperand(0),
-                                       Type::getIntNTy(Ctx, PS), false),
-          DL);
+      if (auto *PtrTy = dyn_cast<PointerType>(CE->getType())) {
+        unsigned BitWidth = DL.getPointerSizeInBits(PtrTy->getAddressSpace());
+        return isBytewiseValue(
+            ConstantExpr::getIntegerCast(CE->getOperand(0),
+                                         Type::getIntNTy(Ctx, BitWidth), false),
+            DL);
+      }
     }
   }
 
@@ -4740,7 +4723,7 @@ static bool canCreateUndefOrPoison(const Operator *Op, bool PoisonOnly) {
     ArrayRef<int> Mask = isa<ConstantExpr>(Op)
                              ? cast<ConstantExpr>(Op)->getShuffleMask()
                              : cast<ShuffleVectorInst>(Op)->getShuffleMask();
-    return any_of(Mask, [](int Elt) { return Elt == UndefMaskElem; });
+    return is_contained(Mask, UndefMaskElem);
   }
   case Instruction::FNeg:
   case Instruction::PHI:
@@ -4894,8 +4877,7 @@ static bool isGuaranteedNotToBeUndefOrPoison(const Value *V,
       else if (PoisonOnly && isa<Operator>(Cond)) {
         // For poison, we can analyze further
         auto *Opr = cast<Operator>(Cond);
-        if (propagatesPoison(Opr) &&
-            any_of(Opr->operand_values(), [&](Value *Op) { return Op == V; }))
+        if (propagatesPoison(Opr) && is_contained(Opr->operand_values(), V))
           return true;
       }
     }
