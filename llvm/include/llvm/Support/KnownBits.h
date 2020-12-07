@@ -179,6 +179,10 @@ public:
     return *this;
   }
 
+  /// Return known bits for a in-register sign extension of the value we're
+  /// tracking.
+  KnownBits sextInReg(unsigned SrcBitWidth) const;
+
   /// Return a KnownBits with the extracted bits
   /// [bitPosition,bitPosition+numBits).
   KnownBits extractBits(unsigned NumBits, unsigned BitPosition) const {
@@ -326,7 +330,7 @@ public:
   KnownBits &operator^=(const KnownBits &RHS);
 
   /// Compute known bits for the absolute value.
-  KnownBits abs() const;
+  KnownBits abs(bool IntMinIsPoison = false) const;
 
   KnownBits byteSwap() {
     return KnownBits(Zero.byteSwap(), One.byteSwap());
