@@ -38,7 +38,8 @@ struct TestLinalgFusionTransforms
 static void fillFusionPatterns(MLIRContext *context,
                                const LinalgDependenceGraph &dependenceGraph,
                                OwningRewritePatternList &patterns) {
-  patterns.insert<LinalgTileAndFusePattern<MatmulOp>>(
+  patterns.insert<LinalgTileAndFusePattern<MatmulOp>,
+                  LinalgTileAndFusePattern<ConvOp>>(
       context, dependenceGraph,
       LinalgTilingOptions()
           .setTileSizes({32, 64, 16})
@@ -124,17 +125,16 @@ static LogicalResult fuseLinalgOpsGreedily(FuncOp f) {
   DenseSet<Operation *> eraseSet;
 
   // Save original Linalg ops, we only want to make a pass over those.
-  SmallVector<Operation *, 8> linalgOps;
+  SmallVector<LinalgOp, 8> linalgOps;
   f.walk([&](LinalgOp op) {
     // TODO: support multi-results.
-    if (op.getOperation()->getNumResults() <= 1)
+    if (op->getNumResults() <= 1)
       linalgOps.push_back(op);
   });
 
   // Tile and Fuse for tensors inputs (TODO: all tensor operands).
   bool changed = false;
-  for (auto *op : llvm::reverse(linalgOps)) {
-    LinalgOp linalgOp = cast<LinalgOp>(op);
+  for (LinalgOp linalgOp : llvm::reverse(linalgOps)) {
     for (auto en : llvm::enumerate(linalgOp.getShapedOperands())) {
       if (en.value().getType().isa<MemRefType>()) {
         // TODO: LinalgDependenceGraph should be able to update itself.
@@ -142,7 +142,7 @@ static LogicalResult fuseLinalgOpsGreedily(FuncOp f) {
         // removed.
         linalg::Aliases aliases;
         linalg::LinalgDependenceGraph graph(aliases, linalgOps);
-        if (auto info = fuseProducerOfBuffer(b, op, en.index(), graph)) {
+        if (auto info = fuseProducerOfBuffer(b, linalgOp, en.index(), graph)) {
           auto *originalOp = info->originalProducer.getOperation();
           eraseSet.insert(originalOp);
           auto *originalOpInLinalgOpsVector =
@@ -155,7 +155,7 @@ static LogicalResult fuseLinalgOpsGreedily(FuncOp f) {
         // Tile and Fuse tensor input (TODO: init_tensors too).
         if (en.index() >= linalgOp.getNumInputs())
           continue;
-        if (auto info = fuseProducerOfTensor(b, op, en.index())) {
+        if (auto info = fuseProducerOfTensor(b, linalgOp, en.index())) {
           auto *originalOp = info->originalProducer.getOperation();
           auto *originalOpInLinalgOpsVector =
               std::find(linalgOps.begin(), linalgOps.end(), originalOp);
@@ -198,6 +198,44 @@ struct TestLinalgGreedyFusion
     }
   }
 };
+
+/// Pass to test tile and fuse of sequence of operations. Intended only for
+/// testing.
+struct TestLinalgTileAndFuseSequencePass
+    : public PassWrapper<TestLinalgTileAndFuseSequencePass, FunctionPass> {
+  TestLinalgTileAndFuseSequencePass() = default;
+  TestLinalgTileAndFuseSequencePass(
+      const TestLinalgTileAndFuseSequencePass &pass){};
+
+  ListOption<int64_t> tileSizes{
+      *this, "tile-sizes", llvm::cl::desc("Tile sizes to use for ops"),
+      llvm::cl::ZeroOrMore, llvm::cl::MiscFlags::CommaSeparated};
+
+  void getDependentDialects(DialectRegistry &registry) const override {
+    registry.insert<AffineDialect, linalg::LinalgDialect, scf::SCFDialect>();
+  }
+
+  void runOnFunction() override {
+    FuncOp funcOp = getOperation();
+    auto &blocks = funcOp.getBody().getBlocks();
+    if (!llvm::hasSingleElement(blocks)) {
+      return;
+    }
+    SmallVector<LinalgOp, 2> linalgOps =
+        llvm::to_vector<2>(blocks.front().getOps<LinalgOp>());
+    Aliases aliases;
+    LinalgDependenceGraph dependenceGraph(aliases, linalgOps);
+    OpBuilder builder(funcOp.getContext());
+    Optional<TiledAndFusedLinalgOps> tileAndFuseOps = tileAndFuseLinalgOps(
+        builder, linalgOps, dependenceGraph,
+        LinalgTilingOptions().setTileSizes(tileSizes).setLoopType(
+            LinalgTilingLoopType::ParallelLoops));
+    if (!tileAndFuseOps)
+      return signalPassFailure();
+    for (auto op : linalgOps)
+      op.erase();
+  }
+};
 } // namespace
 
 namespace mlir {
@@ -212,5 +250,12 @@ void registerTestLinalgGreedyFusion() {
       "test-linalg-greedy-fusion",
       "Test Linalg fusion by applying a greedy test transformation.");
 }
+void registerTestLinalgTileAndFuseSequencePass() {
+  PassRegistration<TestLinalgTileAndFuseSequencePass>
+      testTileAndFuseSequencePass(
+          "test-linalg-tile-and-fuse",
+          "Test Linalg tiling and fusion of a sequence of Linalg operations.");
+}
+
 } // namespace test
 } // namespace mlir

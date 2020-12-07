@@ -8,8 +8,8 @@
 
 #include "mlir/IR/AffineMap.h"
 #include "AffineMapDetail.h"
-#include "mlir/IR/Attributes.h"
-#include "mlir/IR/StandardTypes.h"
+#include "mlir/IR/BuiltinAttributes.h"
+#include "mlir/IR/BuiltinTypes.h"
 #include "mlir/Support/LogicalResult.h"
 #include "mlir/Support/MathExtras.h"
 #include "llvm/ADT/SmallSet.h"
@@ -225,6 +225,10 @@ ArrayRef<AffineExpr> AffineMap::getResults() const {
 AffineExpr AffineMap::getResult(unsigned idx) const {
   assert(map && "uninitialized map storage");
   return map->results[idx];
+}
+
+unsigned AffineMap::getDimPosition(unsigned idx) const {
+  return getResult(idx).cast<AffineDimExpr>().getPosition();
 }
 
 /// Folds the results of the application of an affine map on the provided

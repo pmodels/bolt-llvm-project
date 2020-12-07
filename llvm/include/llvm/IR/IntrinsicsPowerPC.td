@@ -18,10 +18,12 @@
 let TargetPrefix = "ppc" in {  // All intrinsics start with "llvm.ppc.".
   // dcba/dcbf/dcbi/dcbst/dcbt/dcbz/dcbzl(PPC970) instructions.
   def int_ppc_dcba  : Intrinsic<[], [llvm_ptr_ty], []>;
-  def int_ppc_dcbf  : GCCBuiltin<"__builtin_dcbf">,
-                      Intrinsic<[], [llvm_ptr_ty], []>;
-  def int_ppc_dcbfl : Intrinsic<[], [llvm_ptr_ty], []>;
-  def int_ppc_dcbflp: Intrinsic<[], [llvm_ptr_ty], []>;
+  def int_ppc_dcbf : GCCBuiltin<"__builtin_dcbf">,
+                      Intrinsic<[], [llvm_ptr_ty], [IntrArgMemOnly]>;
+  def int_ppc_dcbfl : Intrinsic<[], [llvm_ptr_ty], [IntrArgMemOnly]>;
+  def int_ppc_dcbflp : Intrinsic<[], [llvm_ptr_ty], [IntrArgMemOnly]>;
+  def int_ppc_dcbfps : Intrinsic<[], [llvm_ptr_ty], [IntrArgMemOnly]>;
+  def int_ppc_dcbstps : Intrinsic<[], [llvm_ptr_ty], [IntrArgMemOnly]>;
   def int_ppc_dcbi  : Intrinsic<[], [llvm_ptr_ty], []>;
   def int_ppc_dcbst : Intrinsic<[], [llvm_ptr_ty], []>;
   def int_ppc_dcbt  : Intrinsic<[], [llvm_ptr_ty],
@@ -1421,6 +1423,14 @@ let TargetPrefix = "ppc" in {
 
   def int_ppc_mma_xxsetaccz :
         Intrinsic<[llvm_v512i1_ty], [], [IntrNoMem]>;
+
+  def int_ppc_mma_lxvp :
+        Intrinsic<[llvm_v256i1_ty], [llvm_ptr_ty],
+                  [IntrReadMem, IntrArgMemOnly]>;
+
+  def int_ppc_mma_stxvp :
+        Intrinsic<[], [llvm_v256i1_ty, llvm_ptr_ty],
+                  [IntrWriteMem, IntrArgMemOnly]>;
 
   // MMA Reduced-Precision: Outer Product Intrinsic Definitions.
   defm int_ppc_mma_xvi4ger8 :
