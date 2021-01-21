@@ -62,14 +62,13 @@ def simm5 : Operand<XLenVT>, ImmLeaf<XLenVT, [{return isInt<5>(Imm);}]> {
 
 def SImm5Plus1AsmOperand : AsmOperandClass {
   let Name = "SImm5Plus1";
-  let RenderMethod = "addSImm5Plus1Operands";
+  let RenderMethod = "addImmOperands";
   let DiagnosticType = "InvalidSImm5Plus1";
 }
 
 def simm5_plus1 : Operand<XLenVT>, ImmLeaf<XLenVT,
                                            [{return isInt<5>(Imm - 1);}]> {
   let ParserMatchClass = SImm5Plus1AsmOperand;
-  let PrintMethod = "printSImm5Plus1";
   let MCOperandPredicate = [{
     int64_t Imm;
     if (MCOp.evaluateAsConstantImm(Imm))
@@ -111,6 +110,7 @@ class VWholeLoad<bits<3> nf, string opcodestr>
                 opcodestr, "$vd, (${rs1})"> {
   let vm = 1;
   let Uses = [];
+  let RVVConstraint = NoConstraint;
 }
 
 // segment load vd, (rs1), vm
@@ -512,6 +512,8 @@ defm VADD_V : VALU_IV_V_X_I<"vadd", 0b000000>;
 defm VSUB_V : VALU_IV_V_X<"vsub", 0b000010>;
 defm VRSUB_V : VALU_IV_X_I<"vrsub", 0b000011>;
 
+def : InstAlias<"vneg.v $vd, $vs$vm", (VRSUB_VX VR:$vd, VR:$vs, X0, VMaskOp:$vm)>;
+
 // Vector Widening Integer Add/Subtract
 // Refer to 11.2 Widening Vector Arithmetic Instructions
 // The destination vector register group cannot overlap a source vector
@@ -551,15 +553,15 @@ defm VSEXT_VF2 : VALU_MV_VS2<"vsext.vf2", 0b010010, 0b00111>;
 
 // Vector Integer Add-with-Carry / Subtract-with-Borrow Instructions
 defm VADC_V : VALUm_IV_V_X_I<"vadc", 0b010000>;
-let Constraints = "@earlyclobber $vd", RVVConstraint = Vmadc in {
+let Constraints = "@earlyclobber $vd", RVVConstraint = NoConstraint in {
 defm VMADC_V : VALUm_IV_V_X_I<"vmadc", 0b010001>;
 defm VMADC_V : VALUNoVm_IV_V_X_I<"vmadc", 0b010001>;
-} // Constraints = "@earlyclobber $vd", RVVConstraint = Vmadc
+} // Constraints = "@earlyclobber $vd", RVVConstraint = NoConstraint
 defm VSBC_V : VALUm_IV_V_X<"vsbc", 0b010010>;
-let Constraints = "@earlyclobber $vd", RVVConstraint = Vmadc in {
+let Constraints = "@earlyclobber $vd", RVVConstraint = NoConstraint in {
 defm VMSBC_V : VALUm_IV_V_X<"vmsbc", 0b010011>;
 defm VMSBC_V : VALUNoVm_IV_V_X<"vmsbc", 0b010011>;
-} // Constraints = "@earlyclobber $vd", RVVConstraint = Vmadc
+} // Constraints = "@earlyclobber $vd", RVVConstraint = NoConstraint
 
 // Vector Bitwise Logical Instructions
 defm VAND_V : VALU_IV_V_X_I<"vand", 0b001001>;
@@ -579,10 +581,13 @@ defm VSRA_V : VALU_IV_V_X_I<"vsra", 0b101001, uimm5>;
 // The destination vector register group cannot overlap the first source
 // vector register group (specified by vs2). The destination vector register
 // group cannot overlap the mask register if used, unless LMUL=1.
-let Constraints = "@earlyclobber $vd", RVVConstraint = Narrow in {
+let Constraints = "@earlyclobber $vd" in {
 defm VNSRL_W : VALU_IV_V_X_I<"vnsrl", 0b101100, uimm5, "w">;
 defm VNSRA_W : VALU_IV_V_X_I<"vnsra", 0b101101, uimm5, "w">;
-} // Constraints = "@earlyclobber $vd", RVVConstraint = Narrow
+} // Constraints = "@earlyclobber $vd"
+
+def : InstAlias<"vncvt.x.x.w $vd, $vs$vm",
+                (VNSRL_WX VR:$vd, VR:$vs, X0, VMaskOp:$vm)>;
 
 // Vector Integer Comparison Instructions
 let RVVConstraint = NoConstraint in {
@@ -604,20 +609,32 @@ def : InstAlias<"vmsgeu.vv $vd, $va, $vb$vm",
                 (VMSLEU_VV VR:$vd, VR:$vb, VR:$va, VMaskOp:$vm), 0>;
 def : InstAlias<"vmsge.vv $vd, $va, $vb$vm",
                 (VMSLE_VV VR:$vd, VR:$vb, VR:$va, VMaskOp:$vm), 0>;
-def : InstAlias<"vmsltu.vi $vd, $va, $imm$vm",
-                (VMSLEU_VI VR:$vd, VR:$va, simm5_plus1:$imm,
-                 VMaskOp:$vm), 0>;
-def : InstAlias<"vmslt.vi $vd, $va, $imm$vm",
-                (VMSLE_VI VR:$vd, VR:$va, simm5_plus1:$imm,
-                 VMaskOp:$vm), 0>;
-def : InstAlias<"vmsgeu.vi $vd, $va, $imm$vm",
-                (VMSGTU_VI VR:$vd, VR:$va, simm5_plus1:$imm,
-                 VMaskOp:$vm), 0>;
-def : InstAlias<"vmsge.vi $vd, $va, $imm$vm",
-                (VMSGT_VI VR:$vd, VR:$va, simm5_plus1:$imm,
-                 VMaskOp:$vm), 0>;
 
-let isAsmParserOnly = 1, hasSideEffects = 0, mayLoad = 0, mayStore = 0 in {
+let isCodeGenOnly = 0, isAsmParserOnly = 1, hasSideEffects = 0, mayLoad = 0,
+    mayStore = 0 in {
+// For unsigned comparisons we need to special case 0 immediate to maintain
+// the always true/false semantics we would invert if we just decremented the
+// immediate like we do for signed. To match the GNU assembler we will use
+// vmseq/vmsne.vv with the same register for both operands which we can't do
+// from an InstAlias.
+def PseudoVMSGEU_VI : Pseudo<(outs VR:$vd),
+                             (ins VR:$vs2, simm5_plus1:$imm, VMaskOp:$vm),
+                             [], "vmsgeu.vi", "$vd, $vs2, $imm$vm">;
+def PseudoVMSLTU_VI : Pseudo<(outs VR:$vd),
+                             (ins VR:$vs2, simm5_plus1:$imm, VMaskOp:$vm),
+                             [], "vmsltu.vi", "$vd, $vs2, $imm$vm">;
+// Handle signed with pseudos as well for more consistency in the
+// implementation.
+def PseudoVMSGE_VI : Pseudo<(outs VR:$vd),
+                            (ins VR:$vs2, simm5_plus1:$imm, VMaskOp:$vm),
+                            [], "vmsge.vi", "$vd, $vs2, $imm$vm">;
+def PseudoVMSLT_VI : Pseudo<(outs VR:$vd),
+                            (ins VR:$vs2, simm5_plus1:$imm, VMaskOp:$vm),
+                            [], "vmslt.vi", "$vd, $vs2, $imm$vm">;
+}
+
+let isCodeGenOnly = 0, isAsmParserOnly = 1, hasSideEffects = 0, mayLoad = 0,
+    mayStore = 0 in {
 def PseudoVMSGEU_VX : Pseudo<(outs VR:$vd),
                              (ins VR:$vs2, GPR:$rs1),
                              [], "vmsgeu.vx", "$vd, $vs2, $rs1">;
@@ -637,25 +654,6 @@ def PseudoVMSGE_VX_M_T : Pseudo<(outs VMV0:$vd, VR:$scratch),
                                 (ins VR:$vs2, GPR:$rs1, VMaskOp:$vm),
                                 [], "vmsge.vx", "$vd, $vs2, $rs1$vm, $scratch">;
 }
-
-// This apparently unnecessary alias prevents matching `vmsge{u}.vx vd, vs2, vs1` as if
-// it were an unmasked (i.e. $vm = RISCV::NoRegister) PseudoVMSGE{U}_VX_M.
-def : InstAlias<"vmsgeu.vx $vd, $va, $rs1",
-                (PseudoVMSGEU_VX VR:$vd, VR:$va, GPR:$rs1), 0>;
-def : InstAlias<"vmsge.vx $vd, $va, $rs1",
-                (PseudoVMSGE_VX VR:$vd, VR:$va, GPR:$rs1), 0>;
-def : InstAlias<"vmsgeu.vx v0, $va, $rs1, $vm, $vt",
-                (PseudoVMSGEU_VX_M_T V0, VR:$vt, VR:$va, GPR:$rs1,
-                                     VMaskOp:$vm), 0>;
-def : InstAlias<"vmsge.vx v0, $va, $rs1, $vm, $vt",
-                (PseudoVMSGE_VX_M_T V0, VR:$vt, VR:$va, GPR:$rs1,
-                                    VMaskOp:$vm), 0>;
-def : InstAlias<"vmsgeu.vx $vd, $va, $rs1, $vm",
-                (PseudoVMSGEU_VX_M VRNoV0:$vd, VR:$va, GPR:$rs1,
-                                   VMaskOp:$vm), 0>;
-def : InstAlias<"vmsge.vx $vd, $va, $rs1, $vm",
-                (PseudoVMSGE_VX_M VRNoV0:$vd, VR:$va, GPR:$rs1,
-                                  VMaskOp:$vm), 0>;
 
 // Vector Integer Min/Max Instructions
 defm VMINU_V : VALU_IV_V_X<"vminu", 0b000100>;
@@ -700,7 +698,8 @@ defm VWMACCUS_V : VALUr_MV_X<"vwmaccus", 0b111110>;
 defm VMERGE_V : VALUm_IV_V_X_I<"vmerge", 0b010111>;
 
 // Vector Integer Move Instructions
-let hasSideEffects = 0, mayLoad = 0, mayStore = 0, vs2 = 0, vm = 1 in {
+let hasSideEffects = 0, mayLoad = 0, mayStore = 0, vs2 = 0, vm = 1,
+    RVVConstraint = NoConstraint  in {
 // op vd, vs1
 def VMV_V_V : RVInstVV<0b010111, OPIVV, (outs VR:$vd),
                        (ins VR:$vs1), "vmv.v.v", "$vd, $vs1">;
@@ -732,11 +731,13 @@ defm VSSRL_V : VALU_IV_V_X_I<"vssrl", 0b101010, uimm5>;
 defm VSSRA_V : VALU_IV_V_X_I<"vssra", 0b101011, uimm5>;
 
 // Vector Narrowing Fixed-Point Clip Instructions
-let Constraints = "@earlyclobber $vd", RVVConstraint = Narrow in {
+let Constraints = "@earlyclobber $vd" in {
 defm VNCLIPU_W : VALU_IV_V_X_I<"vnclipu", 0b101110, uimm5, "w">;
 defm VNCLIP_W : VALU_IV_V_X_I<"vnclip", 0b101111, uimm5, "w">;
-} // Constraints = "@earlyclobber $vd", RVVConstraint = Narrow
+} // Constraints = "@earlyclobber $vd"
+} // Predicates = [HasStdExtV]
 
+let Predicates = [HasStdExtV, HasStdExtF] in {
 // Vector Single-Width Floating-Point Add/Subtract Instructions
 defm VFADD_V : VALU_FV_V_F<"vfadd", 0b000000>;
 defm VFSUB_V : VALU_FV_V_F<"vfsub", 0b000010>;
@@ -788,6 +789,8 @@ defm VFWNMSAC_V : VALUr_FV_V_F<"vfwnmsac", 0b111111>;
 
 // Vector Floating-Point Square-Root Instruction
 defm VFSQRT_V : VALU_FV_VS2<"vfsqrt.v", 0b010011, 0b00000>;
+defm VFRSQRTE7_V : VALU_FV_VS2<"vfrsqrte7.v", 0b010011, 0b00100>;
+defm VFRECE7_V : VALU_FV_VS2<"vfrece7.v", 0b010011, 0b00101>;
 
 // Vector Floating-Point MIN/MAX Instructions
 defm VFMIN_V : VALU_FV_V_F<"vfmin", 0b000100>;
@@ -797,6 +800,9 @@ defm VFMAX_V : VALU_FV_V_F<"vfmax", 0b000110>;
 defm VFSGNJ_V : VALU_FV_V_F<"vfsgnj", 0b001000>;
 defm VFSGNJN_V : VALU_FV_V_F<"vfsgnjn", 0b001001>;
 defm VFSGNJX_V : VALU_FV_V_F<"vfsgnjx", 0b001010>;
+
+def : InstAlias<"vfneg.v $vd, $vs$vm",
+                (VFSGNJN_VV VR:$vd, VR:$vs, VR:$vs, VMaskOp:$vm)>;
 
 // Vector Floating-Point Compare Instructions
 let RVVConstraint = NoConstraint in {
@@ -825,6 +831,7 @@ def VFMERGE_VFM : RVInstVX<0b010111, OPFVF, (outs VR:$vd),
 }
 
 // Vector Floating-Point Move Instruction
+let RVVConstraint = NoConstraint in
 def VFMV_V_F : RVInstVX<0b010111, OPFVF, (outs VR:$vd),
                        (ins FPR32:$rs1), "vfmv.v.f", "$vd, $rs1"> {
   let vs2 = 0;
@@ -852,7 +859,7 @@ defm VFWCVT_F_F_V : VALU_FV_VS2<"vfwcvt.f.f.v", 0b010010, 0b01100>;
 } // Constraints = "@earlyclobber $vd", RVVConstraint = WidenCvt
 
 // Narrowing Floating-Point/Integer Type-Convert Instructions
-let Constraints = "@earlyclobber $vd", RVVConstraint = NarrowCvt in {
+let Constraints = "@earlyclobber $vd" in {
 defm VFNCVT_XU_F_W : VALU_FV_VS2<"vfncvt.xu.f.w", 0b010010, 0b10000>;
 defm VFNCVT_X_F_W : VALU_FV_VS2<"vfncvt.x.f.w", 0b010010, 0b10001>;
 defm VFNCVT_RTZ_XU_F_W : VALU_FV_VS2<"vfncvt.rtz.xu.f.w", 0b010010, 0b10110>;
@@ -861,8 +868,10 @@ defm VFNCVT_F_XU_W : VALU_FV_VS2<"vfncvt.f.xu.w", 0b010010, 0b10010>;
 defm VFNCVT_F_X_W : VALU_FV_VS2<"vfncvt.f.x.w", 0b010010, 0b10011>;
 defm VFNCVT_F_F_W : VALU_FV_VS2<"vfncvt.f.f.w", 0b010010, 0b10100>;
 defm VFNCVT_ROD_F_F_W : VALU_FV_VS2<"vfncvt.rod.f.f.w", 0b010010, 0b10101>;
-} // Constraints = "@earlyclobber $vd", RVVConstraint = NarrowCvt
+} // Constraints = "@earlyclobber $vd"
+} // Predicates = [HasStdExtV, HasStdExtF]
 
+let Predicates = [HasStdExtV] in {
 // Vector Single-Width Integer Reduction Instructions
 let RVVConstraint = NoConstraint in {
 defm VREDSUM : VALU_MV_V<"vredsum", 0b000000>;
@@ -884,7 +893,9 @@ let Constraints = "@earlyclobber $vd", RVVConstraint = NoConstraint in {
 defm VWREDSUMU : VALU_IV_V<"vwredsumu", 0b110000>;
 defm VWREDSUM : VALU_IV_V<"vwredsum", 0b110001>;
 } // Constraints = "@earlyclobber $vd", RVVConstraint = NoConstraint
+} // Predicates = [HasStdExtV]
 
+let Predicates = [HasStdExtV, HasStdExtF] in {
 // Vector Single-Width Floating-Point Reduction Instructions
 let RVVConstraint = NoConstraint in {
 defm VFREDOSUM : VALU_FV_V<"vfredosum", 0b000011>;
@@ -902,8 +913,11 @@ let Constraints = "@earlyclobber $vd", RVVConstraint = NoConstraint in {
 defm VFWREDOSUM : VALU_FV_V<"vfwredosum", 0b110011>;
 defm VFWREDSUM : VALU_FV_V<"vfwredsum", 0b110001>;
 } // Constraints = "@earlyclobber $vd", RVVConstraint = NoConstraint
+} // Predicates = [HasStdExtV, HasStdExtF]
 
+let Predicates = [HasStdExtV] in {
 // Vector Mask-Register Logical Instructions
+let RVVConstraint = NoConstraint in {
 defm VMAND_M : VALU_MV_Mask<"vmand", 0b011001, "m">;
 defm VMNAND_M : VALU_MV_Mask<"vmnand", 0b011101, "m">;
 defm VMANDNOT_M : VALU_MV_Mask<"vmandnot", 0b011000, "m">;
@@ -912,6 +926,7 @@ defm VMOR_M : VALU_MV_Mask<"vmor", 0b011010, "m">;
 defm VMNOR_M : VALU_MV_Mask<"vmnor", 0b011110, "m">;
 defm VMORNOT_M : VALU_MV_Mask<"vmornot", 0b011100, "m">;
 defm VMXNOR_M : VALU_MV_Mask<"vmxnor", 0b011111, "m">;
+}
 
 def : InstAlias<"vmmv.m $vd, $vs",
                 (VMAND_MM VR:$vd, VR:$vs, VR:$vs)>;
@@ -922,7 +937,8 @@ def : InstAlias<"vmset.m $vd",
 def : InstAlias<"vmnot.m $vd, $vs",
                 (VMNAND_MM VR:$vd, VR:$vs, VR:$vs)>;
 
-let hasSideEffects = 0, mayLoad = 0, mayStore = 0 in {
+let hasSideEffects = 0, mayLoad = 0, mayStore = 0,
+    RVVConstraint = NoConstraint  in {
 // Vector mask population count vpopc
 def VPOPC_M : RVInstV<0b010000, 0b10000, OPMVV, (outs GPR:$vd),
                         (ins VR:$vs2, VMaskOp:$vm),
@@ -934,17 +950,14 @@ def VFIRST_M : RVInstV<0b010000, 0b10001, OPMVV, (outs GPR:$vd),
                         "vfirst.m", "$vd, $vs2$vm">;
 } // hasSideEffects = 0, mayLoad = 0, mayStore = 0
 
+let Constraints = "@earlyclobber $vd", RVVConstraint = Iota in {
 // vmsbf.m set-before-first mask bit
 defm VMSBF_M : VALU_MV_VS2<"vmsbf.m", 0b010100, 0b00001>;
-
 // vmsif.m set-including-first mask bit
 defm VMSIF_M : VALU_MV_VS2<"vmsif.m", 0b010100, 0b00011>;
-
 // vmsof.m set-only-first mask bit
 defm VMSOF_M : VALU_MV_VS2<"vmsof.m", 0b010100, 0b00010>;
-
 // Vector Iota Instruction
-let Constraints = "@earlyclobber $vd", RVVConstraint = Iota in {
 defm VIOTA_M : VALU_MV_VS2<"viota.m", 0b010100, 0b10000>;
 } // Constraints = "@earlyclobber $vd", RVVConstraint = Iota
 
@@ -956,40 +969,52 @@ def VID_V : RVInstV<0b010100, 0b10001, OPMVV, (outs VR:$vd),
 }
 
 // Integer Scalar Move Instructions
-let vm = 1 in {
+let vm = 1, RVVConstraint = NoConstraint in {
 def VMV_X_S : RVInstV<0b010000, 0b00000, OPMVV, (outs GPR:$vd),
                       (ins VR:$vs2), "vmv.x.s", "$vd, $vs2">;
-def VMV_S_X : RVInstV2<0b010000, 0b00000, OPMVX, (outs VR:$vd),
-                      (ins GPR:$rs1), "vmv.s.x", "$vd, $rs1">;
+let Constraints = "$vd = $vd_wb" in
+def VMV_S_X : RVInstV2<0b010000, 0b00000, OPMVX, (outs VR:$vd_wb),
+                      (ins VR:$vd, GPR:$rs1), "vmv.s.x", "$vd, $rs1">;
 
 }
 } // hasSideEffects = 0, mayLoad = 0, mayStore = 0
+} // Predicates = [HasStdExtV]
 
-let hasSideEffects = 0, mayLoad = 0, mayStore = 0, vm = 1 in {
+let Predicates = [HasStdExtV, HasStdExtF] in {
+let hasSideEffects = 0, mayLoad = 0, mayStore = 0, vm = 1,
+    RVVConstraint = NoConstraint  in {
 // Floating-Point Scalar Move Instructions
 def VFMV_F_S : RVInstV<0b010000, 0b00000, OPFVV, (outs FPR32:$vd),
                       (ins VR:$vs2), "vfmv.f.s", "$vd, $vs2">;
-def VFMV_S_F : RVInstV2<0b010000, 0b00000, OPFVF, (outs VR:$vd),
-                      (ins FPR32:$rs1), "vfmv.s.f", "$vd, $rs1">;
+let Constraints = "$vd = $vd_wb" in
+def VFMV_S_F : RVInstV2<0b010000, 0b00000, OPFVF, (outs VR:$vd_wb),
+                      (ins VR:$vd, FPR32:$rs1), "vfmv.s.f", "$vd, $rs1">;
 
 } // hasSideEffects = 0, mayLoad = 0, mayStore = 0, vm = 1
+} // Predicates = [HasStdExtV, HasStdExtF]
 
+let Predicates = [HasStdExtV] in {
 // Vector Slide Instructions
 let Constraints = "@earlyclobber $vd", RVVConstraint = SlideUp in {
 defm VSLIDEUP_V : VALU_IV_X_I<"vslideup", 0b001110, uimm5>;
+defm VSLIDE1UP_V : VALU_MV_X<"vslide1up", 0b001110>;
 } // Constraints = "@earlyclobber $vd", RVVConstraint = SlideUp
 defm VSLIDEDOWN_V : VALU_IV_X_I<"vslidedown", 0b001111, uimm5>;
+defm VSLIDE1DOWN_V : VALU_MV_X<"vslide1down", 0b001111>;
+} // Predicates = [HasStdExtV]
 
+let Predicates = [HasStdExtV, HasStdExtF] in {
 let Constraints = "@earlyclobber $vd", RVVConstraint = SlideUp in {
-defm VSLIDE1UP_V : VALU_MV_X<"vslide1up", 0b001110>;
 defm VFSLIDE1UP_V : VALU_FV_F<"vfslide1up", 0b001110>;
 } // Constraints = "@earlyclobber $vd", RVVConstraint = SlideUp
-defm VSLIDE1DOWN_V : VALU_MV_X<"vslide1down", 0b001111>;
 defm VFSLIDE1DOWN_V : VALU_FV_F<"vfslide1down", 0b001111>;
+} // Predicates = [HasStdExtV, HasStdExtF]
 
+let Predicates = [HasStdExtV] in {
 // Vector Register Gather Instruction
 let Constraints = "@earlyclobber $vd", RVVConstraint = Vrgather in {
 defm VRGATHER_V : VALU_IV_V_X_I<"vrgather", 0b001100, uimm5>;
+def VRGATHEREI16_VV : VALUVV<0b001110, OPIVV, "vrgatherei16.vv">;
 } // Constraints = "@earlyclobber $vd", RVVConstraint = Vrgather
 
 // Vector Compress Instruction
@@ -997,7 +1022,8 @@ let Constraints = "@earlyclobber $vd", RVVConstraint = Vcompress in {
 defm VCOMPRESS_V : VALU_MV_Mask<"vcompress", 0b010111>;
 } // Constraints = "@earlyclobber $vd", RVVConstraint = Vcompress
 
-let hasSideEffects = 0, mayLoad = 0, mayStore = 0 in {
+let hasSideEffects = 0, mayLoad = 0, mayStore = 0,
+    RVVConstraint = NoConstraint in {
 foreach nf = [1, 2, 4, 8] in {
   def VMV#nf#R_V  : RVInstV<0b100111, !add(nf, -1), OPIVI, (outs VR:$vd),
                             (ins VR:$vs2), "vmv" # nf # "r.v",

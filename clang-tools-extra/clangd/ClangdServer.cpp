@@ -139,15 +139,13 @@ ClangdServer::Options::operator TUScheduler::Options() const {
 ClangdServer::ClangdServer(const GlobalCompilationDatabase &CDB,
                            const ThreadsafeFS &TFS, const Options &Opts,
                            Callbacks *Callbacks)
-    : ConfigProvider(Opts.ConfigProvider), TFS(TFS), ServerCallbacks(Callbacks),
+    : ConfigProvider(Opts.ConfigProvider), CDB(CDB), TFS(TFS),
+      ServerCallbacks(Callbacks),
       DynamicIdx(Opts.BuildDynamicSymbolIndex
                      ? new FileIndex(Opts.HeavyweightDynamicSymbolIndex,
                                      Opts.CollectMainFileRefs)
                      : nullptr),
       ClangTidyProvider(Opts.ClangTidyProvider),
-      SuggestMissingIncludes(Opts.SuggestMissingIncludes),
-      BuildRecoveryAST(Opts.BuildRecoveryAST),
-      PreserveRecoveryASTType(Opts.PreserveRecoveryASTType),
       WorkspaceRoot(Opts.WorkspaceRoot),
       // Pass a callback into `WorkScheduler` to extract symbols from a newly
       // parsed file and rebuild the file index synchronously each time an AST
@@ -202,7 +200,6 @@ void ClangdServer::addDocument(PathRef File, llvm::StringRef Contents,
                                llvm::StringRef Version,
                                WantDiagnostics WantDiags, bool ForceRebuild) {
   ParseOptions Opts;
-  Opts.SuggestMissingIncludes = SuggestMissingIncludes;
 
   // Compile command is set asynchronously during update, as it can be slow.
   ParseInputs Inputs;
@@ -213,8 +210,6 @@ void ClangdServer::addDocument(PathRef File, llvm::StringRef Contents,
   Inputs.Opts = std::move(Opts);
   Inputs.Index = Index;
   Inputs.ClangTidyProvider = ClangTidyProvider;
-  Inputs.Opts.BuildRecoveryAST = BuildRecoveryAST;
-  Inputs.Opts.PreserveRecoveryASTType = PreserveRecoveryASTType;
   bool NewFile = WorkScheduler.update(File, Inputs, WantDiags);
   // If we loaded Foo.h, we want to make sure Foo.cpp is indexed.
   if (NewFile && BackgroundIdx)
@@ -243,22 +238,17 @@ void ClangdServer::codeComplete(PathRef File, Position Pos,
       // No speculation in Fallback mode, as it's supposed to be much faster
       // without compiling.
       vlog("Build for file {0} is not ready. Enter fallback mode.", File);
-    } else {
-      if (CodeCompleteOpts.Index && CodeCompleteOpts.SpeculativeIndexRequest) {
-        SpecFuzzyFind.emplace();
-        {
-          std::lock_guard<std::mutex> Lock(
-              CachedCompletionFuzzyFindRequestMutex);
-          SpecFuzzyFind->CachedReq =
-              CachedCompletionFuzzyFindRequestByFile[File];
-        }
+    } else if (CodeCompleteOpts.Index) {
+      SpecFuzzyFind.emplace();
+      {
+        std::lock_guard<std::mutex> Lock(CachedCompletionFuzzyFindRequestMutex);
+        SpecFuzzyFind->CachedReq = CachedCompletionFuzzyFindRequestByFile[File];
       }
     }
     ParseInputs ParseInput{IP->Command, &TFS, IP->Contents.str()};
     ParseInput.Index = Index;
-    ParseInput.Opts.BuildRecoveryAST = BuildRecoveryAST;
-    ParseInput.Opts.PreserveRecoveryASTType = PreserveRecoveryASTType;
 
+    CodeCompleteOpts.MainFileSignals = IP->Signals;
     // FIXME(ibiryukov): even if Preamble is non-null, we may want to check
     // both the old and the new version in case only one of them matches.
     CodeCompleteResult Result = clangd::codeComplete(
@@ -302,8 +292,6 @@ void ClangdServer::signatureHelp(PathRef File, Position Pos,
 
     ParseInputs ParseInput{IP->Command, &TFS, IP->Contents.str()};
     ParseInput.Index = Index;
-    ParseInput.Opts.BuildRecoveryAST = BuildRecoveryAST;
-    ParseInput.Opts.PreserveRecoveryASTType = PreserveRecoveryASTType;
     CB(clangd::signatureHelp(File, Pos, *PreambleData, ParseInput));
   };
 
@@ -549,8 +537,8 @@ void ClangdServer::switchSourceHeader(
   //     the same directory.
   //  2) if 1) fails, we use the AST&Index approach, it is slower but supports
   //     different code layout.
-  if (auto CorrespondingFile = getCorrespondingHeaderOrSource(
-          std::string(Path), TFS.view(llvm::None)))
+  if (auto CorrespondingFile =
+          getCorrespondingHeaderOrSource(Path, TFS.view(llvm::None)))
     return CB(std::move(CorrespondingFile));
   auto Action = [Path = Path.str(), CB = std::move(CB),
                  this](llvm::Expected<InputsAndAST> InpAST) mutable {
@@ -621,7 +609,7 @@ void ClangdServer::typeHierarchy(PathRef File, Position Pos, int Resolve,
                                 File));
   };
 
-  WorkScheduler.runWithAST("Type Hierarchy", File, std::move(Action));
+  WorkScheduler.runWithAST("TypeHierarchy", File, std::move(Action));
 }
 
 void ClangdServer::resolveTypeHierarchy(
@@ -642,7 +630,7 @@ void ClangdServer::prepareCallHierarchy(
       return CB(InpAST.takeError());
     CB(clangd::prepareCallHierarchy(InpAST->AST, Pos, File));
   };
-  WorkScheduler.runWithAST("Call Hierarchy", File, std::move(Action));
+  WorkScheduler.runWithAST("CallHierarchy", File, std::move(Action));
 }
 
 void ClangdServer::incomingCalls(
@@ -678,7 +666,7 @@ void ClangdServer::documentSymbols(llvm::StringRef File,
           return CB(InpAST.takeError());
         CB(clangd::getDocumentSymbols(InpAST->AST));
       };
-  WorkScheduler.runWithAST("documentSymbols", File, std::move(Action),
+  WorkScheduler.runWithAST("DocumentSymbols", File, std::move(Action),
                            TUScheduler::InvalidateOnUpdate);
 }
 
@@ -690,7 +678,7 @@ void ClangdServer::foldingRanges(llvm::StringRef File,
           return CB(InpAST.takeError());
         CB(clangd::getFoldingRanges(InpAST->AST));
       };
-  WorkScheduler.runWithAST("foldingRanges", File, std::move(Action),
+  WorkScheduler.runWithAST("FoldingRanges", File, std::move(Action),
                            TUScheduler::InvalidateOnUpdate);
 }
 
@@ -873,6 +861,7 @@ Context ClangdServer::createProcessingContext(PathRef File) const {
 LLVM_NODISCARD bool
 ClangdServer::blockUntilIdleForTest(llvm::Optional<double> TimeoutSeconds) {
   return WorkScheduler.blockUntilIdle(timeoutSeconds(TimeoutSeconds)) &&
+         CDB.blockUntilIdle(timeoutSeconds(TimeoutSeconds)) &&
          (!BackgroundIdx ||
           BackgroundIdx->blockUntilIdleForTest(TimeoutSeconds));
 }

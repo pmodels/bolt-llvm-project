@@ -80,6 +80,7 @@ add_mlir_library(mlir_c_runner_utils
   EXCLUDE_FROM_LIBMLIR
   )
 set_property(TARGET mlir_c_runner_utils PROPERTY CXX_STANDARD 11)
+target_compile_definitions(mlir_c_runner_utils PRIVATE mlir_c_runner_utils_EXPORTS)
 
 add_mlir_library(mlir_c_runner_utils_static
   CRunnerUtils.cpp
@@ -88,7 +89,6 @@ add_mlir_library(mlir_c_runner_utils_static
   EXCLUDE_FROM_LIBMLIR
   )
 set_property(TARGET mlir_c_runner_utils_static PROPERTY CXX_STANDARD 11)
-target_compile_definitions(mlir_c_runner_utils PRIVATE mlir_c_runner_utils_EXPORTS)
 
 add_mlir_library(mlir_runner_utils
   SHARED
@@ -101,6 +101,15 @@ add_mlir_library(mlir_runner_utils
 )
 target_compile_definitions(mlir_runner_utils PRIVATE mlir_runner_utils_EXPORTS)
 
+add_mlir_library(mlir_runner_utils_static
+  RunnerUtils.cpp
+
+  EXCLUDE_FROM_LIBMLIR
+
+  LINK_LIBS PUBLIC
+  mlir_c_runner_utils_static
+)
+
 add_mlir_library(mlir_async_runtime
   SHARED
   AsyncRuntime.cpp
@@ -111,4 +120,15 @@ add_mlir_library(mlir_async_runtime
   mlir_c_runner_utils_static
   ${LLVM_PTHREAD_LIB}
 )
+set_property(TARGET mlir_async_runtime PROPERTY CXX_VISIBILITY_PRESET hidden)
 target_compile_definitions(mlir_async_runtime PRIVATE mlir_async_runtime_EXPORTS)
+
+add_mlir_library(mlir_async_runtime_static
+  AsyncRuntime.cpp
+
+  EXCLUDE_FROM_LIBMLIR
+
+  LINK_LIBS PUBLIC
+  mlir_c_runner_utils_static
+  ${LLVM_PTHREAD_LIB}
+)
