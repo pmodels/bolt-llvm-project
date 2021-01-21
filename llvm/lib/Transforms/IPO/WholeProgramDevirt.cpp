@@ -59,7 +59,6 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/Triple.h"
 #include "llvm/ADT/iterator_range.h"
-#include "llvm/Analysis/AliasAnalysis.h"
 #include "llvm/Analysis/AssumptionCache.h"
 #include "llvm/Analysis/BasicAliasAnalysis.h"
 #include "llvm/Analysis/OptimizationRemarkEmitter.h"
@@ -471,7 +470,7 @@ CallSiteInfo &VTableSlotInfo::findCallSiteInfo(CallBase &CB) {
   auto *CBType = dyn_cast<IntegerType>(CB.getType());
   if (!CBType || CBType->getBitWidth() > 64 || CB.arg_empty())
     return CSInfo;
-  for (auto &&Arg : make_range(CB.arg_begin() + 1, CB.arg_end())) {
+  for (auto &&Arg : drop_begin(CB.args())) {
     auto *CI = dyn_cast<ConstantInt>(Arg);
     if (!CI || CI->getBitWidth() > 64)
       return CSInfo;
@@ -1280,8 +1279,7 @@ void DevirtModule::applyICallBranchFunnel(VTableSlotInfo &SlotInfo,
       // x86_64.
       std::vector<Type *> NewArgs;
       NewArgs.push_back(Int8PtrTy);
-      for (Type *T : CB.getFunctionType()->params())
-        NewArgs.push_back(T);
+      append_range(NewArgs, CB.getFunctionType()->params());
       FunctionType *NewFT =
           FunctionType::get(CB.getFunctionType()->getReturnType(), NewArgs,
                             CB.getFunctionType()->isVarArg());
@@ -1290,7 +1288,7 @@ void DevirtModule::applyICallBranchFunnel(VTableSlotInfo &SlotInfo,
       IRBuilder<> IRB(&CB);
       std::vector<Value *> Args;
       Args.push_back(IRB.CreateBitCast(VCallSite.VTable, Int8PtrTy));
-      Args.insert(Args.end(), CB.arg_begin(), CB.arg_end());
+      llvm::append_range(Args, CB.args());
 
       CallBase *NewCS = nullptr;
       if (isa<CallInst>(CB))
@@ -2215,6 +2213,4 @@ void DevirtIndex::run() {
   if (PrintSummaryDevirt)
     for (const auto &DT : DevirtTargets)
       errs() << "Devirtualized call to " << DT << "\n";
-
-  return;
 }

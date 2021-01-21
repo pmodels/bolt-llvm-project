@@ -17,28 +17,17 @@
 #include "AMDGPUMachineFunction.h"
 #include "MCTargetDesc/AMDGPUMCTargetDesc.h"
 #include "SIInstrInfo.h"
-#include "SIRegisterInfo.h"
-#include "llvm/ADT/ArrayRef.h"
-#include "llvm/ADT/DenseMap.h"
-#include "llvm/ADT/Optional.h"
-#include "llvm/ADT/STLExtras.h"
-#include "llvm/ADT/SmallVector.h"
-#include "llvm/ADT/SparseBitVector.h"
 #include "llvm/CodeGen/MIRYamlMapping.h"
 #include "llvm/CodeGen/PseudoSourceValue.h"
-#include "llvm/CodeGen/TargetInstrInfo.h"
-#include "llvm/MC/MCRegisterInfo.h"
-#include "llvm/Support/ErrorHandling.h"
-#include <array>
-#include <cassert>
-#include <utility>
-#include <vector>
+#include "llvm/Support/raw_ostream.h"
 
 namespace llvm {
 
 class MachineFrameInfo;
 class MachineFunction;
 class TargetRegisterClass;
+class SIMachineFunctionInfo;
+class SIRegisterInfo;
 
 class AMDGPUPseudoSourceValue : public PseudoSourceValue {
 public:
@@ -286,6 +275,9 @@ struct SIMachineFunctionInfo final : public yaml::MachineFunctionInfo {
   bool HasSpilledVGPRs = false;
   uint32_t HighBitsOf32BitAddress = 0;
 
+  // TODO: 10 may be a better default since it's the maximum.
+  unsigned Occupancy = 0;
+
   StringValue ScratchRSrcReg = "$private_rsrc_reg";
   StringValue FrameOffsetReg = "$fp_reg";
   StringValue StackPtrOffsetReg = "$sp_reg";
@@ -324,6 +316,7 @@ template <> struct MappingTraits<SIMachineFunctionInfo> {
     YamlIO.mapOptional("mode", MFI.Mode, SIMode());
     YamlIO.mapOptional("highBitsOf32BitAddress",
                        MFI.HighBitsOf32BitAddress, 0u);
+    YamlIO.mapOptional("occupancy", MFI.Occupancy, 0);
   }
 };
 
