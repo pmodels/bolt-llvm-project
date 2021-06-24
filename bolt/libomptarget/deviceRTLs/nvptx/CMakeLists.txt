@@ -192,7 +192,7 @@ foreach(sm ${nvptx_sm_list})
     set(bclib_target_name "omptarget-nvptx-cuda_${cuda_version}-sm_${sm}-bc")
 
     add_custom_target(${bclib_target_name} ALL DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/${bclib_name})
-    add_dependencies(omptarget-nvptx-bc ${bclib_target_name})
+    add_dependencies(bolt-omptarget-nvptx-bc ${bclib_target_name})
 
     # Copy library to destination.
     add_custom_command(TARGET ${bclib_target_name} POST_BUILD
